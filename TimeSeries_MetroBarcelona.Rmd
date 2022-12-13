@@ -1,0 +1,781 @@
+---
+title: "Box-Jenkins methodology on Barcelona's subway passengers"
+author:
+  - Luis Rojo-González^[Universitat Politècnica de Catalunya, luis.rojo.g@usach.cl]
+date: "June 18, 2020"
+output:
+  pdf_document:
+    fig_caption: yes
+    toc: false # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    highlight: tango  # specifies the syntax highlighting style
+  header-includes:
+  - \usepackage{float}
+  - \usepackage{amsmath}
+  - \usepackage[spanish]{babel}
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{natbib}
+  - \usepackage{booktabs}
+  - \usepackage{hyperref}
+  html_document:
+    df_print: paged
+params:
+  seed: 12345
+abstract: ""
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r echo = FALSE}
+# Working directory
+setwd("~/Desktop/UPC/TimeSeries/Project")
+```
+
+```{r message = FALSE, warning = FALSE}
+### Libraries
+library(tseries)
+library(ggplot2)
+library(car)
+library(urca)
+library(forecast)
+library(fGarch)
+library(rugarch)
+library(xts)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(zoo)
+library(lubridate)
+library(xtable)
+library(ggpubr)
+library(fracdiff)
+library(fTrading) #EWMA
+library(xts)
+library(sarima)
+library(rmgarch)
+library(astsa)
+```
+
+\section{Time series description}
+
+Barcelona's subway passengers (thousands of commuters). Monthly data.\footnote{You can find the code in \url{https://drive.google.com/drive/folders/1h5FAs--aJiAMflkE0qBRh1gtO32NR4wf?usp=sharing}}
+
+Source: Ministerio de Fomento \url{http://www.ine.es/jaxiT3/Tabla.htm?t=20193}
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ts}Time serie of Barcelona's subway passengers.", message=FALSE, warning=FALSE}
+# --------- Data loading -------
+serie = ts(read.table("Series/metro.dat"), start = 1996, freq = 12)
+plot(serie, main = "Users of the Barcelona metro",
+     ylab = "Thousands of people", xlab = "")
+abline(v = 1996:2020, lty = 3, col = 4)
+```
+
+\section{Identification}
+
+\subsection{Stationarity and unit roots analysis} \label{subsec:stationarity}
+
+Figure \ref{fig:boxmeanvar} shows there are differences on the variance of the series (see y-axis of scatterplot), so it is conveniently to apply the logarithm to stabilize it.
+
+```{r, fig.width = 10, fig.height = 7, fig.cap = "\\label{fig:boxmeanvar}Boxplot and mean-variance plot for anually data.", message=FALSE, warning=FALSE}
+par(mfrow = c(2, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+m = apply(matrix(serie, nr = 12), 2, mean)
+v = apply(matrix(serie, nr = 12), 2, var)
+plot(m, v, xlab = "Mean",
+     ylab = "",
+     main = "Mean-Variance plot")
+abline(lm(v ~ m), col = 2, lty = 3, lwd = 2)
+##Boxplot por años
+boxplot(serie ~ floor(time(serie)), xlab = "",
+        main = "Boxplot by year", ylab = "")
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:monthplot}Monthplot.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+monthplot(serie, ylab = "")
+```
+
+```{r}
+# log series
+lnserie = log(serie)
+# differentiated log series
+d12lnserie = diff(lnserie, 12)
+d1d12lnserie = diff(d12lnserie)
+d1d1d12lnserie = diff(d1d12lnserie)
+```
+
+Applying the logarithm conjoint a seasonal differentiation and up to two regular differentiations to explore the stationarity of the series we get the (Partial)Auto-Correlation Function plots shown in Figure \ref{fig:diff}, where all of them has short variances, but the first serie (logserie with seasonal differentiation) looks like the best one, but it and the serie with one regular differentiation are so close. Also, we have to note that there are a couple of outliers.
+
+```{r, fig.width = 10, fig.height = 8, fig.cap = "\\label{fig:diff}Differentiated time series plot.", message=FALSE, warning=FALSE}
+par(mfrow = c(3, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+plot(d12lnserie, main = paste("Variance =", round(var(d12lnserie), 5)),
+     ylab = "log Thousands of people", xlab = "")
+abline(h = 0, col = 2, lty = 3, lwd = 2)
+plot(d1d12lnserie, main = paste("Variance =", round(var(d1d12lnserie), 5)),
+     ylab = "log Thousands of people", xlab = "")
+abline(h = 0, col = 2, lty = 3, lwd = 2)
+plot(d1d1d12lnserie, main = paste("Variance =", round(var(d1d1d12lnserie), 5)),
+     ylab = "log Thousands of people", xlab = "")
+abline(h = 0, col = 2, lty = 3, lwd = 2)
+```
+
+The (Partial)Auto-Correlation function plots for these series seem to indicate the first differentiation (seasonal) would be enough to work with in terms of stationarity such as Figure \ref{fig:acf} shows. Nonetheless, this conclusion at first glance might be wrong, so we perform a Ljung-Box test as a more formal tool to see whether the time series has a unit root (null hypothesis) or are stationary (alternative hypothesis).
+
+```{r, fig.width = 10, fig.height = 12, fig.cap = "\\label{fig:acf}ACF and PACF plots for original time series and differentiated log-time series.", message=FALSE, warning=FALSE}
+# -------- Pruebas informales: gr?fico de la serie, fac, facp y Ljung-Box test ------
+par(mfrow = c(3, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# time series
+acf(d12lnserie, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(0, 4))
+pacf(d12lnserie, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(0, 4))
+
+# differentiated log-time series
+acf(d1d12lnserie, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(0, 4))
+pacf(d1d12lnserie, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(0, 4))
+
+# second differentiated log-time series
+acf(d1d1d12lnserie, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(0, 4))
+pacf(d1d1d12lnserie, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(0, 4))
+```
+
+Obtained results for Ljung-Box test (their p-values) are in Table \ref{tab:lbt1} where we can see all of time series (original and differentiated ones) would be jointly independent, which is a good property towards models chosen\footnote{Keep in mind that d12ln notation represents differentiation and logarithm transformation.}.
+
+```{r results = 'asis'}
+box.pvalue = tibble(lag = 4+4*c(0:4))
+for (i in 1:nrow(box.pvalue)) {
+  # box.pvalue[i, 2] = Box.test(lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 2] = Box.test(d12lnserie, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  # box.pvalue[i, 4] = Box.test(d1lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 3] = Box.test(d1d12lnserie, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  # box.pvalue[i, 6] = Box.test(d1d1lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 4] = Box.test(d1d1d12lnserie, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  # box.pvalue[i, 8] = Box.test(d1d1lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+}
+colnames(box.pvalue) = c("Lag", "p.value (d12lnserie)", "p.value (d1d12lnserie)",
+                         "p.value (d1d1d12lnserie)")
+
+box.pvalue$Lag = as.factor(box.pvalue$Lag)
+
+print(xtable(box.pvalue,
+             digits = 4, label = "tab:lbt1",
+             caption = "Ljung-Box test results for original 
+             and differentiated log-time series."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+Formal tests to prove stationarity are given by Dickey-Fuller (DF), Phillips-Perron (PP) and Kwiatkowski-Phillips-Schmidt-Shin (KPSS); where the presence of unit roots (null hipothesis) against stationarity (alternative hypothesis) are tested for first two tests whereas the last one uses the stationarity as null hypothesis. Table \ref{tab:dfppkpss} shows p-values for each performed test, where it is clearly to see logged series has an unit root, but from first lag (d12lnserie) we get a stationary time series, thus we can claim that the time series has an unit root and it is stationary at first lag.
+
+```{r results = 'asis', warning=FALSE, message=FALSE}
+df.pp = data.frame(d12lnserie = c(adf.test(d12lnserie, k = 0)$p.value,
+                                  pp.test(d12lnserie, type = "Z(t_alpha)",
+                                          lshort = TRUE)$p.value,
+                                  pp.test(d12lnserie, type = "Z(t_alpha)",
+                                          lshort = FALSE)$p.value,
+                                  kpss.test(d12lnserie, null = "Level",
+                                            lshort = TRUE)$p.value,
+                                  kpss.test(d12lnserie, null = "Level",
+                                            lshort = FALSE)$p.value),
+                   d1d12lnserie = c(adf.test(d1d12lnserie, k = 0)$p.value,
+                                    pp.test(d1d12lnserie, type = "Z(t_alpha)",
+                                            lshort = TRUE)$p.value,
+                                    pp.test(d1d12lnserie, type = "Z(t_alpha)",
+                                            lshort = FALSE)$p.value,
+                                    kpss.test(d1d12lnserie, null = "Level",
+                                              lshort = TRUE)$p.value,
+                                    kpss.test(d1d12lnserie, null = "Level",
+                                              lshort = FALSE)$p.value),
+                   d1d1d12lnserie = c(adf.test(d1d1d12lnserie, k = 0)$p.value,
+                                      pp.test(d1d1d12lnserie, type = "Z(t_alpha)",
+                                              lshort = TRUE)$p.value,
+                                      pp.test(d1d1d12lnserie, type = "Z(t_alpha)",
+                                              lshort = FALSE)$p.value,
+                                      kpss.test(d1d1d12lnserie, null = "Level",
+                                                lshort = TRUE)$p.value,
+                                      kpss.test(d1d1d12lnserie, null = "Level",
+                                                lshort = FALSE)$p.value))
+rownames(df.pp) = c("DickeyFuller", "PhillipsPerronShort", "PhillipsPerronLong",
+                          "KPSSShort", "KPSSLong")
+
+print(xtable(df.pp,
+             digits = 4, label = "tab:dfppkpss",
+             caption = "P-values of Dickey-Fullar, Phillips-Perron and 
+             Kwiatkowski-Phillips-Schmidt-Shin tests."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\subsection{Descriptive statistics} \label{subsec:descriptivestat}
+
+Some basic descriptive statistics show us the time series we are working with is not normal and has leptokurtic distribution (see Table \ref{tab:res1}) which is supported by the Jarque-Bera test, also such as Figure \ref{fig:normplot1} shows we can recognize there is an important influent outlier in the time series.
+
+```{r results = 'asis', warning=FALSE, message=FALSE}
+#Estad?sticos b?sicos de las series
+res = tibble(Min = min(d12lnserie),
+             Q1 = quantile(d12lnserie, probs = 0.25),
+             Mean = mean(d12lnserie), Median = median(d12lnserie),
+             Q3 = quantile(d12lnserie, probs = 0.75),
+             Sd = sd(d12lnserie),
+             Skewnesss = skewness(d12lnserie),
+             Kurtosis = kurtosis(d12lnserie, method = "moment"),
+             JarqueBera = normalTest(d12lnserie,
+                                     method = "jb")@test[["p.value"]][["Asymptotic p Value"]])
+
+print(xtable(res,
+             digits = 2, label = "tab:res1",
+             caption = "Descriptive statistics of the 
+             differentiated log-time series."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = FALSE)
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:normplot1}Histogram and QQ-plot for normality assessment.", message=FALSE, warning=FALSE}
+# Histogram of returns with normal curve
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+hist(d12lnserie, breaks = 20, freq = F,
+     main = 'Differentiated log-time series histogram')
+curve(dnorm(x, mean = mean(d12lnserie),
+            sd = sd(d12lnserie)), col = 2, add = T)
+qqnorm(d12lnserie)
+qqline(d12lnserie, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+```
+
+\section{Model for the mean} \label{sec:modelmean}
+
+\subsection{Identification} \label{subsec:modelmean1}
+
+As we saw in Section \ref{subsec:stationarity}, in particular in Figure \ref{fig:boxmeanvar}, there are differences on the variance so the logarithm must be applied, then one seasonal difference was applied to find such stationary time series to work with.
+
+To help the decision making we take into account the test performed above as well as (Partial)Auto-Correlation Function plots (see Figure \ref{fig:acf}) which show there would be two \textit{suitable} models: i) SARIMA$(3, 0, 0)_{(1, 1, 1)_{12}}$ and ii) SARIMA$(3, 0, 4)_{(1, 1, 1)_{12}}$.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:acf2}ACF and PACF plots for differentiated log-time series.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# time series
+acf(d12lnserie, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(0, 4))
+pacf(d12lnserie, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(0, 4))
+```
+
+\subsection{Estimation} \label{subsec:modelmean2}
+
+The first model to work with is a SARIMA$(3, 0, 0)_{(1, 1, 1)_{12}}$, which gives us that the SAR estimation is non-significative so by discarding this we get a SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$ represented by equation \eqref{eq:m1}. This model looks good in term of the AIC = -3.1722, AICc = -3.1715 and BIC = -3.0966.
+
+\begin{equation} \label{eq:m1}
+(1-0.2423_{(0.00)}B-0.2837_{(0.00)}B^2-0.2484_{(0.00)}B^3)(1-B^{12})x_t = 0.0016_{(0.00)} + (1-0.5911_{(0.00)}B^{12})z_t
+\end{equation}
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:model1}Diagnosis for first fitted model.", message=FALSE, warning=FALSE, results = 'hide'}
+# SARIMA$(3, 0, 0)_{(1, 1, 1)_{12}}$
+# SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$
+# body(sarima)[[18]] = quote(trc <- abs(details-1)) 
+model1 = sarima(lnserie, 3, 0, 0, 0, 1, 1, 12,
+                details = FALSE, no.constant = FALSE, Model = FALSE)
+```
+
+The first model to work with is a SARIMA$(3, 0, 4)_{(1, 1, 1)_{12}}$, which gives us some parameters are non-significative so by discarding them on a sequential way we get a SARIMA$(1, 0, 2)_{(0, 1, 1)_{12}}$ represented by equation \eqref{eq:m2}. This model looks good in term of the AIC = -3.1620, AICc = -3.1613 and BIC = -3.0864.
+
+\begin{equation} \label{eq:m2}
+(1-0.8973_{(0.00)}B)(1-B^{12})x_t = 0.0016_{(0.00)} + (1-0.6619_{(0.00)}B+0.1403_{(0.04)}B^2)(1-0.5945_{(0.00)}B^{12})z_t
+\end{equation}
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:model2}Diagnosis for second fitted model.", message=FALSE, warning=FALSE, results = 'hide'}
+# SARIMA$(3, 0, 4)_{(1, 1, 1)_{12}}$
+# SARIMA$(1, 0, 2)_{(0, 1, 1)_{12}}$
+# body(sarima)[[18]] = quote(trc <- abs(details-1))
+model2 = sarima(lnserie, 1, 0, 2, 0, 1, 1, 12,
+                details = FALSE, no.constant = FALSE, Model = FALSE)
+```
+
+\subsection{Diagnosis} \label{subsec:modelmean3}
+
+In this section we check the model assumptions taking into account residuals must be gaussian distributed, it means that residuals have zero-mean and constant variance as well as jointly independent white noise considering lags and their $\pi$ and $\psi$ weights for stationarity (causality) and invertibility, also we check their stability dropping-out some last observations as re-estimating the coefficients.
+
+\textbf{The first model to check is the SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$} which such as Figure \ref{fig:val1} shows looks good in terms of zero-mean and constant variance as well as (Partial)Auto-Correlation Function plots cut-off after first lag and inmediately, respectively. Also, they seem to be normal distributed although some outliers, but are not jointly independent after lag number eight.
+
+```{r, fig.width = 10, fig.height = 13, fig.cap = "\\label{fig:val1}SARIMA(3, 0, 0)(0, 1, 1)12 residuals' analysis.", message=FALSE, warning=FALSE}
+par(font = 2, font.lab = 4, font.axis = 2, las = 1)
+layout(matrix(c(1, 1,
+                2, 3,
+                4, 5,
+                6, 7,
+                8, 8), nrow = 5, byrow = TRUE))
+plot(scale(model1$fit$residuals), type = "l",
+     xlab = "", ylab = "Standardized residuals", main = "SARIMA(3, 0, 0)(0, 1, 1)12")
+acf(model1$fit$residuals, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Residuals", xlim = c(0, 4))
+acf(model1$fit$residuals^2, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(0, 4))
+pacf(model1$fit$residuals, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Residuals", xlim = c(0, 4))
+pacf(model1$fit$residuals^2, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(0, 4))
+hist(model1$fit$residuals, breaks = 20, freq = F, xlab = "residuals",
+     main = 'Residual histogram')
+curve(dnorm(x, mean = mean(model1$fit$residuals),
+            sd = sd(model1$fit$residuals)), col = 2, add = T)
+qqnorm(model1$fit$residuals)
+qqline(model1$fit$residuals, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+B = data.frame(Lag = 1:20)
+for (i in B$Lag) {
+  B[i, 2] = Box.test(model1$fit$residuals, type = c("Ljung-Box"),
+                     lag = i, fitdf = i - length(model1$fit$coef))$p.value
+}
+plot(x = B$Lag, y = B$V2, xlab = "Lag", ylab = "p.value", pch = 21,
+     main = "Ljung-Box test", bg = ifelse(B$V2 > 0.05, "blue", "red"),
+     col = ifelse(B$V2 > 0.05, "blue", "red"))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+To check wheter the model is stationary (causal) and invertible, we rewrite it in their AR($\infty$) and MA($\infty$) form, which give us $\psi$ and $\pi$-weights. These weights, which are shown in Table \ref{tab:weight1}, are lower than the unit and the root of the model is larger than one, so we can claim there is not invertibility problems and also it is causal.
+
+```{r results = 'asis'}
+# Stationary and Invertible
+  cat("\nModul of AR Characteristic polynomial Roots: ", 
+      Mod(polyroot(c(1,-model1$fit$model$phi))),"\n")
+  cat("\nModul of MA Characteristic polynomial Roots: ",
+      Mod(polyroot(c(1,model1$fit$model$theta))),"\n")
+
+# Model expressed as an MA infinity (psi-weights)
+  psis = ARMAtoMA(ar = model1$fit$model$phi, ma = model1$fit$model$theta,
+                  lag.max = 40)
+  
+#Model expressed as an AR infinity (pi-weights)
+  pis = -ARMAtoMA(ar = -model1$fit$model$theta, ma = -model1$fit$model$phi,
+                  lag.max = 40)
+
+print(xtable(t(tibble("$\\psi_j$" = psis[1:10], "$\\pi_j$" = pis[1:10])),
+             digits = 4, label = "tab:weight1",
+             caption = "Weight of SARIMA(3, 0, 0)(0, 1, 1)12 as AR and MA infinity."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+Finally, the stability assessment is performed using the last 12 observations (to replicate a year). We see that the fitted models, represented in equation \eqref{eq:stab1}, has similar estimated coefficients, both significatives, and also similar AIC (-3.1722 and -3.1558), AICc (-3.1715 and -3.1550) and BIC (-3.0966 and -3.0778) values, thereby we can say this model is stable.
+
+\begin{equation} \label{eq:stab1}
+(1-0.2312_{(0.00)}B-0.2881_{(0.00)}B^2-0.2628_{(0.00)}B^3)(1-B^{12})x_t = 0.0016_{(0.00)} + (1-0.5912_{(0.00)}B^{12})z_t
+\end{equation}
+
+```{r results = 'hide'}
+#### test period
+out = 12
+#### serie completa
+serie1 = lnserie
+#### serie hasta el penultimo año
+serie2 = head(lnserie, length(lnserie) - out)
+# tail(serie2, 1)
+# body(sarima)[[18]] = quote(trc <- abs(details-1))
+# (mod = sarima(serie1, 3, 0, 0, 0, 1, 1, 12,
+#                 details = TRUE, no.constant = FALSE, Model = TRUE))
+(mod2 = sarima(serie2, 3, 0, 0, 0, 1, 1, 12,
+                details = FALSE, no.constant = FALSE, Model = TRUE))
+```
+
+\textbf{The second model to check is the SARIMA$(1, 0, 2)_{(0, 1, 1)_{12}}$} which such as Figure \ref{fig:val2} shows looks good in terms of zero-mean and constant variance as well as (Partial)Auto-Correlation Function plots cut-off after first lag and inmediately, respectively. Also, they seem to be normal distributed although some outliers, but are not jointly independent after lag number six.
+
+```{r, fig.width = 10, fig.height = 13, fig.cap = "\\label{fig:val2}SARIMA(1, 0, 2)(0, 1, 1)12 residuals' analysis.", message=FALSE, warning=FALSE}
+par(font = 2, font.lab = 4, font.axis = 2, las = 1)
+layout(matrix(c(1, 1,
+                2, 3,
+                4, 5,
+                6, 7,
+                8, 8), nrow = 5, byrow = TRUE))
+plot(scale(model2$fit$residuals), type = "l",
+     xlab = "", ylab = "Standardized residuals", main = "SARIMA(1, 0, 2)(0, 1, 1)12")
+acf(model2$fit$residuals, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Residuals", xlim = c(0, 4))
+acf(model2$fit$residuals^2, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(0, 4))
+pacf(model2$fit$residuals, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Residuals", xlim = c(0, 4))
+pacf(model2$fit$residuals^2, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(0, 4))
+hist(model2$fit$residuals, breaks = 20, freq = F, xlab = "residuals",
+     main = 'Residual histogram')
+curve(dnorm(x, mean = mean(model2$fit$residuals),
+            sd = sd(model2$fit$residuals)), col = 2, add = T)
+qqnorm(model2$fit$residuals)
+qqline(model2$fit$residuals, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+B = data.frame(Lag = 1:20)
+for (i in B$Lag) {
+  B[i, 2] = Box.test(model2$fit$residuals, type = c("Ljung-Box"),
+                     lag = i, fitdf = i - length(model2$fit$coef))$p.value
+}
+plot(x = B$Lag, y = B$V2, xlab = "Lag", ylab = "p.value", pch = 21,
+     main = "Ljung-Box test", bg = ifelse(B$V2 > 0.05, "blue", "red"),
+     col = ifelse(B$V2 > 0.05, "blue", "red"))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+To check wheter the model is stationary (causal) and invertible, we rewrite it in their AR($\infty$) and MA($\infty$) form, which give us $\psi$ and $\pi$-weights. These weights, which are shown in Table \ref{tab:weight2}, are lower than the unit and the root of the model is larger than one, so we can claim there is not invertibility problems and also it is causal.
+
+```{r results = 'asis'}
+# Stationary and Invertible
+  cat("\nModul of AR Characteristic polynomial Roots: ", 
+      Mod(polyroot(c(1,-model2$fit$model$phi))),"\n")
+  cat("\nModul of MA Characteristic polynomial Roots: ",
+      Mod(polyroot(c(1,model2$fit$model$theta))),"\n")
+
+# Model expressed as an MA infinity (psi-weights)
+  psis = ARMAtoMA(ar = model2$fit$model$phi, ma = model2$fit$model$theta,
+                  lag.max = 40)
+  
+#Model expressed as an AR infinity (pi-weights)
+  pis = -ARMAtoMA(ar = -model2$fit$model$theta, ma = -model2$fit$model$phi,
+                  lag.max = 40)
+
+print(xtable(t(tibble("$\\psi_j$" = psis[1:10], "$\\pi_j$" = pis[1:10])),
+             digits = 4, label = "tab:weight2",
+             caption = "Weight of SARIMA(1, 0, 2)(0, 1, 1)12 as AR and MA infinity."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+Finally, the stability assessment is performed using the last 12 observations (to replicate a year). We see that the fitted models, represented in equation \eqref{eq:stab2}, has similar estimated coefficients, both significatives, and also similar AIC (-3.1620 and -3.1455), AICc (-3.1613 and -3.1447) and BIC (-3.0864 and -3.0675) values, thereby we can say this model is stable.
+
+\begin{equation} \label{eq:stab2}
+(1-0.9054_{(0.00)}B)(1-B^{12})x_t = 0.0016_{(0.00)} + (1-0.6846_{(0.00)}B+0.1479_{(0.03)}B^2)(1-0.5941_{(0.00)}B^{12})z_t
+\end{equation}
+
+```{r results = 'hide'}
+out = 12
+#### serie completa
+serie1 = tail(lnserie, out)
+#### serie incompleta
+serie2 = head(lnserie, length(lnserie) - out)
+body(sarima)[[18]] = quote(trc <- abs(details-1))
+# (mod = sarima(serie1, 1, 0, , 0, 1, 1, 12,
+#                 details = TRUE, no.constant = FALSE, Model = TRUE))
+(mod2 = sarima(serie2, 1, 0, 2, 0, 1, 1, 12,
+                details = FALSE, no.constant = FALSE, Model = TRUE))
+```
+
+We have seen both models have good properties and behaviours, nevertheless their residuals are not jointly independent further than eight and six lags, respectively. Also, we know that the AIC for SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$ and SARIMA$(1, 0, 2)_{(0, 1, 1)_{12}}$ are -3.1722 and -3.1620, respectively, which would enable us to choose in favor of SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$ model; so, both models has good properties to work with and any of them could be a good choise, but the criterias support a bit more in favor of first fitted model.
+
+\subsection{Forecasting} \label{subsec:modelmean4}
+
+As we know the most suitable model among fitted ones corresponds to SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$. Thus, if we consider this model to get forecasting during the next period, that is to say for the next 12 months we have that curve such as Figure \ref{fig:forecast1} shows including with $\pm$ 2 prediction error bounds, and Table \ref{tab:pred} shows these values.
+
+```{r fig.show='hide'}
+# SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$
+# body(sarima)[[18]] = quote(trc <- abs(details-1))
+pred.aux1 = sarima.for(serie2, 12, 3, 0, 0, 0, 1, 1, 12,
+                       no.constant = FALSE, plot.all = FALSE)
+pred = sarima.for(lnserie, 12, 3, 0, 0, 0, 1, 1, 12,
+                  no.constant = FALSE, plot.all = FALSE)
+```
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:forecast1}Forecasting for the next 12 months.", message=FALSE, warning=FALSE, results = 'hide'}
+plot(lnserie, xlim = c(2011, 2021), ylim = c(10, 10.7))
+# points(pred$pred, col = 2)
+lines(pred$pred, col = 2, type = "o")
+lines(pred$pred + 2*pred$se, col = 4, type = "o")
+lines(pred$pred - 2*pred$se, col = 4, type = "o")
+legend("bottomleft", c("Forecast", "Confidence bounds"),
+       pch = 19, lty = c(0, 0), lwd = c(0, 0), col = c(2, 4))
+```
+
+```{r results = 'asis'}
+print(xtable(t(tibble("$\\log(x_t)$" = pred$pred,
+                      "$+2se$" = pred$pred + 2*pred$se,
+                      "$-2se$" = pred$pred - 2*pred$se)),
+             digits = 2, label = "tab:pred",
+             caption = "Forecasting for next 12 months."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+\section{Outlier Treatment} \label{sec:outlier}
+
+Given the prior knowledge on this time series, it is natural to think on calendar effects are presents, e.g. weekends and non-labour days. On the other hand, given the above results on residual where some outliers are shown in residual qqplot (see Figure \ref{fig:val1}) ouliers treatment must be carried out.
+
+\subsection{Calendar effects} \label{subsec:calendar}
+
+```{r message=FALSE, warning=FALSE}
+source("CalendarEffects.r")
+```
+
+By estimating a model using both trading days and eastern days we get that these coefficients are significative almost at any confidence level; thus, each linearized time series is such as Figure \ref{fig:lin} shows, where we can clearly see the time series does not change at all despite of we applied these kind of outliers treatment. Even so, it is a starting point toward the automatic detection of outliers as we shows in the next Section.
+
+```{r message=FALSE, warning=FALSE}
+data = c(start(serie)[1], start(serie)[2], length(serie))
+wTradDays = Wtrad(data)
+wEast = Weaster(data)
+# cpunt = ts(rep(0, length(serie)), start = start(serie),
+#            freq = frequency(serie))
+# cpunt[175:length(serie)] = 1
+# (cpunt)
+```
+
+```{r results = 'hide'}
+# SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$
+body(sarima)[[18]] = quote(trc <- abs(details-1))
+(model1.1 = sarima(lnserie, 3, 0, 0, 0, 1, 1, 12, xreg = wTradDays,
+                   details = FALSE, no.constant = FALSE))
+```
+
+```{r results = 'hide'}
+# SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$
+body(sarima)[[18]] = quote(trc <- abs(details-1))
+(model1.2 = sarima(lnserie, 3, 0, 0, 0, 1, 1, 12, xreg = wEast,
+                   details = FALSE, no.constant = FALSE))
+```
+
+```{r results = 'hide'}
+# SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$
+body(sarima)[[18]] = quote(trc <- abs(details-1))
+(model1.3 = sarima(lnserie, 3, 0, 0, 0, 1, 1, 12, xreg = data.frame(wTradDays, wEast),
+                   details = FALSE, no.constant = FALSE))
+```
+
+```{r}
+coef.td = model1.1$fit$coef["xreg"]*wTradDays
+coef.eas = model1.2$fit$coef["xreg"]*wEast
+coef.both = model1.3$fit$coef["wTradDays"]*wTradDays + model1.3$fit$coef["wEast"]*wEast
+linserie1 = lnserie - coef.td
+linserie2 = lnserie - coef.eas
+linserie3 = lnserie - coef.both
+```
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:lin}Linearized time series.", message=FALSE, warning=FALSE}
+par(font = 2, font.lab = 4, font.axis = 2, las = 1)
+plot(lnserie, main = "",
+     ylab = "log Thousands of people", xlab = "", col = 1)
+lines(linserie1, col = 2)
+lines(linserie2, col = 3)
+lines(linserie3, col = 4)
+legend("bottomright", c("Original", "Without trading days",
+                     "Without easter effects", "Without both"),
+       pch = 19, lty = c(0, 0), lwd = c(0, 0), col = c(1:4))
+```
+
+\subsection{Automatic detection of outliers} \label{subsec:auto}
+
+```{r message=FALSE, warning=FALSE}
+source("atipics2.r")
+```
+
+Once we have obtained a first approach desired linearized time series it is turn to detect other possible outliers we should take into account. On this way, we consider three kind of outliers: i) Level Shift, ii) Additive Outlier and iii) Transitory Change. If we do so considering a criteria equal to 2.5 we get the linearized time series and the residual by considering it as Figure \ref{fig:lin2} shows, also Table \ref{tab:outlier} shows the identified outliers and the kind as they are considered.
+
+```{r, fig.width = 10, fig.height = 8, fig.cap = "\\label{fig:lin2}Linearized time series adding outlier detection.", message=FALSE, warning=FALSE}
+par(mfrow = c(2, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+model1.4 = outdetec(model1.3, dif = c(0, 12), crit = 2.5, LS = TRUE)
+linserie = lineal(lnserie, model1.4$atip)
+linserie1 = linserie - coef.both
+plot(lnserie - linserie1)
+plot(lnserie, col = 1)
+lines(linserie1, col = 2)
+legend("bottomright", c("Original", "Linearized"),
+       pch = 19, lty = c(0, 0), lwd = c(0, 0), col = c(1:2))
+```
+
+```{r results='asis'}
+print(xtable(model1.4$atip[order(model1.4$atip$Obs),],
+             digits = 2, label = "tab:outlier",
+             caption = "Detected ouliers. Level Shift (LS), Additive Outlier (AO) and Transitory Change (TC)."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = FALSE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+Now, as we have a linearized time series a model identification must be doing again. Such as we saw above, the first seasonal differentiation was enough to obtain a stationary time series, so we expect that the same occur here. Thus, such as Figure \ref{fig:acf2} shows the identified model is the same as before, that is to say it is a SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$, where its mathematical expression is as equation \eqref{eq:m3} shows. This model looks good in term of the AIC = -4.4874 and the AICc = -4.4866 and BIC = -4.4117.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:acf2}ACF and PACF plots for linearized log-time series.", message=FALSE, warning=FALSE}
+# -------- Pruebas informales: gr?fico de la serie, fac, facp y Ljung-Box test ------
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# time series
+acf(diff(linserie1, 12), ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(0, 4))
+pacf(diff(linserie1, 12), ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(0, 4))
+
+# # differentiated log-time series
+# acf(diff(diff(linserie1, 12)), ylim = c(-1, 1), col = c(2, rep(1, 11)),
+#     lwd = 2, lag.max = 40, xlim = c(0, 4))
+# pacf(diff(diff(linserie1, 12)), ylim = c(-1, 1), col = c(rep(1, 11), 2),
+#      lwd = 2, lag.max = 40, xlim = c(0, 4))
+# 
+# # second differentiated log-time series
+# acf(diff(diff(diff(linserie1, 12))), ylim = c(-1, 1), col = c(2, rep(1, 11)),
+#     lwd = 2, lag.max = 40, xlim = c(0, 4))
+# pacf(diff(diff(diff(linserie1, 12))), ylim = c(-1, 1), col = c(rep(1, 11), 2),
+#      lwd = 2, lag.max = 40, xlim = c(0, 4))
+```
+
+\begin{equation} \label{eq:m3}
+(1-0.4749_{(0.00)}B-0.1162_{(0.08)}B^2-0.2036_{(0.00)}B^3)(1-B^{12})x_t = 0.0014_{(0.00)} + (1-0.1790_{(0.01)}B^{12})z_t
+\end{equation}
+
+```{r results = 'hide'}
+(model1.5 = sarima(linserie1, 3, 0, 0, 0, 1, 1, 12,
+                   details = FALSE, no.constant = FALSE))
+```
+
+\subsection{Diagnosis}
+
+On the other hand, Figure \ref{fig:val3} shows the model validation stage where a clearly improvement is obtained related to qqplot and Ljung-Box test, where in this last test we get a jointly independent residuals until 15 lag against the eight lags obtained before. Also this model is both causal and invertible due to $\psi$ and $\pi$ weights shown in Table \ref{tab:weight3} are lower than 1.
+
+```{r, fig.width = 10, fig.height = 13, fig.cap = "\\label{fig:val3}SARIMA(3, 0, 0)(0, 1, 1)12 residuals' analysis.", message=FALSE, warning=FALSE}
+par(font = 2, font.lab = 4, font.axis = 2, las = 1)
+layout(matrix(c(1, 1,
+                2, 3,
+                4, 5,
+                6, 7,
+                8, 8), nrow = 5, byrow = TRUE))
+plot(scale(model1.5$fit$residuals), type = "l",
+     xlab = "", ylab = "Standardized residuals", main = "SARIMA(3, 0, 0)(0, 1, 1)12")
+acf(model1.5$fit$residuals, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Residuals", xlim = c(0, 4))
+acf(model1.5$fit$residuals^2, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(0, 4))
+pacf(model1.5$fit$residuals, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Residuals", xlim = c(0, 4))
+pacf(model1.5$fit$residuals^2, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(0, 4))
+hist(model1.5$fit$residuals, breaks = 20, freq = F, xlab = "residuals",
+     main = 'Residual histogram')
+curve(dnorm(x, mean = mean(model1.5$fit$residuals),
+            sd = sd(model1.5$fit$residuals)), col = 2, add = T)
+qqnorm(model1.5$fit$residuals)
+qqline(model1.5$fit$residuals, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+B = data.frame(Lag = 1:20)
+for (i in B$Lag) {
+  B[i, 2] = Box.test(model1.5$fit$residuals, type = c("Ljung-Box"),
+                     lag = i, fitdf = i - length(model1.5$fit$coef))$p.value
+}
+plot(x = B$Lag, y = B$V2, xlab = "Lag", ylab = "p.value", pch = 21,
+     main = "Ljung-Box test", bg = ifelse(B$V2 > 0.05, "blue", "red"),
+     col = ifelse(B$V2 > 0.05, "blue", "red"))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+```{r results = 'asis'}
+# Stationary and Invertible
+  cat("\nModul of AR Characteristic polynomial Roots: ", 
+      Mod(polyroot(c(1,-model1.5$fit$model$phi))),"\n")
+  cat("\nModul of MA Characteristic polynomial Roots: ",
+      Mod(polyroot(c(1,model1.5$fit$model$theta))),"\n")
+
+# Model expressed as an MA infinity (psi-weights)
+  psis = ARMAtoMA(ar = model1.5$fit$model$phi, ma = model1.5$fit$model$theta,
+                  lag.max = 40)
+  
+#Model expressed as an AR infinity (pi-weights)
+  pis = -ARMAtoMA(ar = -model1.5$fit$model$theta, ma = -model1.5$fit$model$phi,
+                  lag.max = 40)
+
+print(xtable(t(tibble("$\\psi_j$" = psis[1:10], "$\\pi_j$" = pis[1:10])),
+             digits = 4, label = "tab:weight3",
+             caption = "Weight of SARIMA(3, 0, 0)(0, 1, 1)12 as AR and MA infinity."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+Finally, the stability assessment is performed using the last 12 observations (to replicate a year). We see that the fitted models, represented in equation \eqref{eq:stab3}, has similar estimated coefficients, both significatives, and also similar AIC (-4.4874 and -4.4752), AICc (-4.4866 and -4.4744) and BIC (-4.4117 and -4.3972) values, thereby we can say this model is stable.
+
+\begin{equation} \label{eq:stab3}
+(1-0.4657_{(0.00)}B-0.1156_{(0.08)}B^2-0.2164_{(0.00)}B^3)(1-B^{12})x_t = 0.0013_{(0.01)} + (1-0.1593_{(0.01)}B^{12})z_t
+\end{equation}
+
+```{r results = 'hide'}
+out = 12
+#### serie completa
+serie1.lin = tail(linserie1, out)
+#### serie incompleta
+serie2 = head(linserie1, length(linserie1) - out)
+body(sarima)[[18]] = quote(trc <- abs(details-1))
+# (mod = sarima(serie1, 1, 0, , 0, 1, 1, 12,
+#                 details = TRUE, no.constant = FALSE, Model = TRUE))
+(mod3 = sarima(serie2, 3, 0, 0, 0, 1, 1, 12,
+               details = FALSE, no.constant = FALSE, Model = TRUE))
+```
+
+\subsection{Forecasting}
+
+```{r fig.show='hide'}
+# SARIMA$(3, 0, 0)_{(0, 1, 1)_{12}}$
+# body(sarima)[[18]] = quote(trc <- abs(details-1))
+pred.aux2 = sarima.for(serie2, 12, 3, 0, 0, 0, 1, 1, 12,
+                       no.constant = FALSE, plot.all = FALSE)
+pred2 = sarima.for(linserie1, 12, 3, 0, 0, 0, 1, 1, 12,
+                   no.constant = FALSE, plot.all = FALSE)
+```
+
+Following with the proposed methodology, but now considering the linearized time series we get the forecasting for the next 12 months such as Figure \ref{fig:forecast2} shows conjoint the obtained confidence intervals where the values are shown in Table \ref{tab:pred2}.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:forecast2}Forecasting for the next 12 months using the linearized time series.", message=FALSE, warning=FALSE, results = 'hide'}
+plot(lnserie, xlim = c(2011, 2021), ylim = c(10, 10.6))
+lines(pred2$pred, col = 2, type = "o")
+lines(pred2$pred + 2*pred2$se, col = 4, type = "o")
+lines(pred2$pred - 2*pred2$se, col = 4, type = "o")
+legend("bottomleft", c("Forecast", "Confidence bounds"),
+       pch = 19, lty = c(0, 0), lwd = c(0, 0), col = c(2, 4))
+```
+
+```{r results = 'asis'}
+print(xtable(t(tibble("$\\log(x_t)$" = pred2$pred,
+                      "$+2se$" = pred2$pred + 2*pred2$se,
+                      "$-2se$" = pred2$pred - 2*pred2$se)),
+             digits = 2, label = "tab:pred2",
+             caption = "Forecasting for the next 12 months using the linearized time series."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+\subsection{Model selection} \label{subsec:selection}
+
+Finally, we already have two possible forecast for next 12 months; so we have to compare these two models. Both forecast are shown in Figure \ref{fig:comparison} where it is clearly to see that the model which works with linearized time series gives us lower values against the non-linearized one.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:comparison}Comparison on forecasting for the next 12 months using the non-linearized and linearized time series.", message=FALSE, warning=FALSE, results = 'hide'}
+plot(lnserie, xlim = c(2015, 2021), ylim = c(10, 10.6))
+lines(pred$pred, col = 2, lty = 1, type = "o")
+lines(pred2$pred, col = 3, lty = 1, type = "o")
+legend("bottomleft", c("Non-linearized", "Linearized"),
+       pch = 19, lty = c(0, 0), lwd = c(0, 0), col = c(2, 3))
+```
+
+We can consider those performance indicators such as Table \ref{tab:performance} shows which are obtained when we not consider the last 12 observation to check the stability of the models. Thus, we have criterion on which model selection would be based on. Therefore, according to these criterias, that model estimated on linearized time series is only worst in terms of the number of estimated parameters, nonetheless the parsimony criterias such as AIC and BIC are better in both cases; so we can claim that the second model which includes the outliers treatment is the best option among the estimated models.
+
+```{r results = 'asis'}
+resul = data.frame(par = c(length(mod2$fit$coef),
+                           length(mod2$fit$coef) + nrow(model1.4$atip)),
+                   Sigma2 = c(mod2$fit$sigma2,
+                               mod3$fit$sigma2),
+                   AIC = c(mod2$AIC,
+                           mod3$AIC),
+                   BIC = c(mod2$BIC,
+                           mod3$BIC),
+                   RMSPE = c(sqrt(sum(((serie1 - pred.aux1$pred)/serie1)^2)/out),
+                             sqrt(sum(((serie1.lin - pred.aux2$pred)/serie1)^2)/out)),
+                   MAPE = c(sum(abs(serie1 - pred.aux1$pred)/serie1)/out,
+                            sum(abs(serie1.lin - pred.aux2$pred)/serie1)/out),
+                   meanLength = c(sum(4*pred.aux1$se)/out,
+                                  sum(4*pred.aux2$se)/out))
+row.names(resul) = c("Non-linearized",
+                     "Linearized")
+
+print(xtable(resul,
+             digits = 4, label = "tab:performance",
+             caption = "Performance indicators for estimated models."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
